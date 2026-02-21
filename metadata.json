@@ -1,0 +1,7 @@
+{
+  "name": "SecureChain Pro",
+  "description": "A multi-layered blockchain voting system with Twilio OTP verification, JWT authentication, and MongoDB persistence.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
