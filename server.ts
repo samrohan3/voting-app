@@ -165,22 +165,122 @@ const authenticate = (req: any, res: any, next: any) => {
   }
 };
 
+// Helper for formatting time (e.g. "09:00" -> "9:00 AM", "17:00" -> "5:00 PM")
+function formatTimeTo12Hour(timeStr: string): string {
+  if (!timeStr) return '9:00 AM';
+  const [hStr, mStr] = timeStr.split(':');
+  const h = parseInt(hStr, 10);
+  const m = parseInt(mStr || '0', 10);
+  const period = h >= 12 ? 'PM' : 'AM';
+  const displayH = h % 12 === 0 ? 12 : h % 12;
+  const displayM = m.toString().padStart(2, '0');
+  return `${displayH}:${displayM} ${period}`;
+}
+
+export function isWithinVotingHours(
+  startTime = '09:00',
+  endTime = '17:00',
+  customDate?: Date
+): {
+  allowed: boolean;
+  message: string;
+  serverTime: string;
+  allowedWindow: string;
+} {
+  const now = customDate || new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  const [startH, startM] = startTime.split(':').map(Number);
+  const [endH, endM] = endTime.split(':').map(Number);
+
+  const startTotal = (startH ?? 9) * 60 + (startM ?? 0);
+  const endTotal = (endH ?? 17) * 60 + (endM ?? 0);
+
+  const allowed = currentMinutes >= startTotal && currentMinutes < endTotal;
+  
+  const startFmt = formatTimeTo12Hour(startTime);
+  const endFmt = formatTimeTo12Hour(endTime);
+  const allowedWindow = `${startFmt} and ${endFmt}`;
+
+  return {
+    allowed,
+    message: allowed
+      ? 'Voting is open'
+      : `Voting is closed. Allowed timing is strictly between ${allowedWindow}.`,
+    serverTime: now.toISOString(),
+    allowedWindow
+  };
+}
+
 // --- Business Logic & Blockchain Layer ---
 
 // Settings APIs
 app.get('/api/settings', async (req, res) => {
   let settings = await Settings.findOne();
-  if (!settings) settings = await Settings.create({});
-  res.json(settings);
+  if (!settings) {
+    settings = await Settings.create({
+      isVotingActive: true,
+      startTime: '09:00',
+      endTime: '17:00',
+      enforceTimeWindow: true
+    });
+  }
+  const timeCheck = isWithinVotingHours(settings.startTime || '09:00', settings.endTime || '17:00');
+  res.json({
+    ...settings.toObject(),
+    isWithinHours: timeCheck.allowed,
+    serverTime: new Date().toISOString(),
+    serverTimeFormatted: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  });
 });
 
 app.post('/api/settings/toggle', authenticate, async (req: any, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   let settings = await Settings.findOne();
-  if (!settings) settings = await Settings.create({});
+  if (!settings) {
+    settings = await Settings.create({
+      isVotingActive: true,
+      startTime: '09:00',
+      endTime: '17:00',
+      enforceTimeWindow: true
+    });
+  }
   settings.isVotingActive = !settings.isVotingActive;
   await settings.save();
-  res.json(settings);
+  const timeCheck = isWithinVotingHours(settings.startTime || '09:00', settings.endTime || '17:00');
+  res.json({
+    ...settings.toObject(),
+    isWithinHours: timeCheck.allowed,
+    serverTime: new Date().toISOString(),
+    serverTimeFormatted: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  });
+});
+
+app.post('/api/settings/hours', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { startTime, endTime, enforceTimeWindow } = req.body;
+  let settings = await Settings.findOne();
+  if (!settings) {
+    settings = await Settings.create({
+      isVotingActive: true,
+      startTime: '09:00',
+      endTime: '17:00',
+      enforceTimeWindow: true
+    });
+  }
+
+  if (startTime !== undefined) settings.startTime = startTime;
+  if (endTime !== undefined) settings.endTime = endTime;
+  if (enforceTimeWindow !== undefined) settings.enforceTimeWindow = enforceTimeWindow;
+
+  await settings.save();
+  const timeCheck = isWithinVotingHours(settings.startTime || '09:00', settings.endTime || '17:00');
+  res.json({
+    ...settings.toObject(),
+    isWithinHours: timeCheck.allowed,
+    serverTime: new Date().toISOString(),
+    serverTimeFormatted: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  });
 });
 
 // Issues API
@@ -219,7 +319,27 @@ app.post('/api/vote', authenticate, async (req: any, res) => {
 
   try {
     let settings = await Settings.findOne();
-    if (settings && !settings.isVotingActive) {
+    if (!settings) {
+      settings = await Settings.create({
+        isVotingActive: true,
+        startTime: '09:00',
+        endTime: '17:00',
+        enforceTimeWindow: true
+      });
+    }
+
+    // 1. Time-based restriction check (Strict 9:00 AM - 5:00 PM window)
+    if (settings.enforceTimeWindow !== false) {
+      const timeCheck = isWithinVotingHours(settings.startTime || '09:00', settings.endTime || '17:00');
+      if (!timeCheck.allowed) {
+        return res.status(403).json({
+          error: timeCheck.message
+        });
+      }
+    }
+
+    // 2. Voting process manual status check
+    if (!settings.isVotingActive) {
       return res.status(400).json({ error: 'Voting process is currently closed' });
     }
 
