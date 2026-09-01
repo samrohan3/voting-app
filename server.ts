@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
@@ -6,7 +7,35 @@ import twilio from 'twilio';
 import { createServer as createViteServer } from 'vite';
 import User from './models/User';
 import Block from './models/Block';
+import Settings from './models/Settings';
+import VoterIssue from './models/VoterIssue';
 import crypto from 'crypto';
+
+// Encryption setup
+const ENCRYPTION_KEY = crypto.scryptSync(process.env.VOTING_SECRET || 'default_secret', 'salt', 32);
+const IV_LENGTH = 16;
+
+function encryptVote(text: string) {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+  let encrypted = cipher.update(text);
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+function decryptVote(text: string) {
+  try {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift()!, 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch(e) {
+    return text; // Fallback for old unencrypted votes
+  }
+}
 
 const app = express();
 const PORT = 3000;
@@ -52,6 +81,20 @@ app.post('/api/auth/send-otp', async (req, res) => {
     console.error('Server error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// Admin Login (for demo purposes)
+app.post('/api/auth/admin-login', (req, res) => {
+  const { password } = req.body;
+  if (password === 'admin123') {
+    const token = jwt.sign(
+      { id: 'admin-id', mobile: 'admin', role: 'admin' },
+      process.env.JWT_SECRET || 'fallback_secret',
+      { expiresIn: '24h' }
+    );
+    return res.json({ token });
+  }
+  return res.status(401).json({ error: 'Invalid admin password' });
 });
 
 // 2. Verify OTP & Login
@@ -124,11 +167,62 @@ const authenticate = (req: any, res: any, next: any) => {
 
 // --- Business Logic & Blockchain Layer ---
 
+// Settings APIs
+app.get('/api/settings', async (req, res) => {
+  let settings = await Settings.findOne();
+  if (!settings) settings = await Settings.create({});
+  res.json(settings);
+});
+
+app.post('/api/settings/toggle', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  let settings = await Settings.findOne();
+  if (!settings) settings = await Settings.create({});
+  settings.isVotingActive = !settings.isVotingActive;
+  await settings.save();
+  res.json(settings);
+});
+
+// Issues API
+app.post('/api/issues', async (req, res) => {
+  const { mobile, photoBase64 } = req.body;
+  const user = await User.findOne({ mobile });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const issue = await VoterIssue.create({ userId: user._id, photoBase64 });
+  res.json({ success: true, issue });
+});
+
+app.get('/api/issues', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const issues = await VoterIssue.find({ status: 'pending' }).populate('userId');
+  res.json(issues);
+});
+
+app.post('/api/issues/:id/resolve', authenticate, async (req: any, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const issue = await VoterIssue.findById(req.params.id);
+  if (!issue) return res.status(404).json({ error: 'Issue not found' });
+  issue.status = 'resolved';
+  await issue.save();
+  
+  const user = await User.findById(issue.userId);
+  if (user) {
+    user.hasVoted = false;
+    await user.save();
+  }
+  res.json({ success: true });
+});
+
 app.post('/api/vote', authenticate, async (req: any, res) => {
   const { partyId } = req.body;
   const userId = req.user.id;
 
   try {
+    let settings = await Settings.findOne();
+    if (settings && !settings.isVotingActive) {
+      return res.status(400).json({ error: 'Voting process is currently closed' });
+    }
+
     const user = await User.findById(userId);
     if (!user || user.hasVoted) {
       return res.status(400).json({ error: 'User has already voted or not found' });
@@ -141,12 +235,14 @@ app.post('/api/vote', authenticate, async (req: any, res) => {
     const timestamp = Date.now();
     const voterId = crypto.createHash('sha256').update(user.mobile).digest('hex');
 
+    const encryptedPartyId = encryptVote(partyId);
+
     // Simple PoW simulation
     let nonce = 0;
     let hash = '';
     while (true) {
       hash = crypto.createHash('sha256')
-        .update(`${index}${previousHash}${timestamp}${partyId}${voterId}${nonce}`)
+        .update(`${index}${previousHash}${timestamp}${encryptedPartyId}${voterId}${nonce}`)
         .digest('hex');
       if (hash.startsWith('00')) break; // Difficulty 2
       nonce++;
@@ -155,7 +251,7 @@ app.post('/api/vote', authenticate, async (req: any, res) => {
     const newBlock = await Block.create({
       index,
       timestamp,
-      partyId,
+      partyId: encryptedPartyId,
       voterId,
       previousHash,
       hash,
@@ -173,8 +269,22 @@ app.post('/api/vote', authenticate, async (req: any, res) => {
 
 app.get('/api/results', async (req, res) => {
   try {
+    let settings = await Settings.findOne();
+    const isVotingActive = settings ? settings.isVotingActive : true;
+    
     const blocks = await Block.find().sort({ index: 1 });
-    res.json(blocks);
+    
+    if (isVotingActive) {
+      const hiddenBlocks = blocks.map(b => ({ ...b.toObject(), partyId: 'HIDDEN' }));
+      return res.json({ isVotingActive, blocks: hiddenBlocks });
+    }
+
+    const decryptedBlocks = blocks.map(b => ({
+      ...b.toObject(),
+      partyId: decryptVote(b.partyId)
+    }));
+    
+    res.json({ isVotingActive, blocks: decryptedBlocks });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch results' });
   }
