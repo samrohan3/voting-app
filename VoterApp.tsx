@@ -4,12 +4,16 @@ import { auditBlockchain } from './services/geminiService';
 import BlockchainVisualizer from './components/BlockchainVisualizer';
 import Webcam from 'react-webcam';
 import { 
-  ShieldCheck, Smartphone, Lock, Vote, AlertCircle, ArrowRight, CheckCircle2, Camera
+  ShieldCheck, Smartphone, Lock, Vote, AlertCircle, ArrowRight, CheckCircle2, Camera, Clock
 } from 'lucide-react';
 
 const VoterApp: React.FC = () => {
   const [appState, setAppState] = useState<AppState | 'SECURITY_CHECK' | 'FACE_SCAN'>(AppState.REGISTRATION);
   const [isVotingActive, setIsVotingActive] = useState<boolean | null>(null);
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('17:00');
+  const [enforceTimeWindow, setEnforceTimeWindow] = useState(true);
+  const [isWithinHours, setIsWithinHours] = useState(true);
   const [blockchain, setBlockchain] = useState<Block[]>([]);
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
   const [user, setUser] = useState<any>(null);
@@ -22,12 +26,27 @@ const VoterApp: React.FC = () => {
   const webcamRef = useRef<Webcam>(null);
   const [photoSent, setPhotoSent] = useState(false);
 
+  const format12Hour = (timeStr: string) => {
+    if (!timeStr) return '9:00 AM';
+    const [hStr, mStr] = timeStr.split(':');
+    const h = parseInt(hStr, 10);
+    const m = parseInt(mStr || '0', 10);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const displayH = h % 12 === 0 ? 12 : h % 12;
+    const displayM = m.toString().padStart(2, '0');
+    return `${displayH}:${displayM} ${period}`;
+  };
+
   useEffect(() => {
     const checkSettings = async () => {
       try {
         const res = await fetch('/api/settings');
         const data = await res.json();
         setIsVotingActive(data.isVotingActive);
+        if (data.startTime) setStartTime(data.startTime);
+        if (data.endTime) setEndTime(data.endTime);
+        if (data.enforceTimeWindow !== undefined) setEnforceTimeWindow(data.enforceTimeWindow);
+        if (data.isWithinHours !== undefined) setIsWithinHours(data.isWithinHours);
       } catch (e) {
         console.error(e);
       }
@@ -167,6 +186,10 @@ const VoterApp: React.FC = () => {
             <p className="text-xs text-slate-500 font-medium uppercase tracking-widest">Next-Gen Voting System</p>
           </div>
         </div>
+        <div className="flex items-center gap-2 bg-slate-100 px-3.5 py-1.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-700">
+          <Clock size={14} className="text-blue-600" />
+          <span>Active Window: <strong className="text-slate-900">{format12Hour(startTime)} – {format12Hour(endTime)}</strong></span>
+        </div>
       </header>
 
       <main className="w-full max-w-xl flex flex-col gap-6">
@@ -191,7 +214,7 @@ const VoterApp: React.FC = () => {
                     value={mobileInput}
                     onChange={(e) => setMobileInput(e.target.value.replace(/\D/g, '').slice(0, 10))}
                     placeholder="555 123 4567"
-                    className="w-full pl-10 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-lg font-medium tracking-wider"
+                    className="w-full pl-14 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-lg font-medium tracking-wider"
                   />
                 </div>
               </div>
@@ -260,12 +283,12 @@ const VoterApp: React.FC = () => {
 
             <div className="flex flex-col items-center gap-4">
               <div className="overflow-hidden rounded-2xl border-4 border-slate-100 w-full max-w-sm">
-                <Webcam
-                  audio={false}
-                  ref={webcamRef}
-                  screenshotFormat="image/jpeg"
-                  className="w-full"
-                />
+                {React.createElement(Webcam as any, {
+                  audio: false,
+                  ref: webcamRef,
+                  screenshotFormat: "image/jpeg",
+                  className: "w-full"
+                })}
               </div>
               <button 
                 onClick={handleFaceCapture}
@@ -300,13 +323,37 @@ const VoterApp: React.FC = () => {
 
         {/* Step 3: Voting Booth */}
         {appState === AppState.VOTING_BOOTH && (
-          isVotingActive ? (
+          !isVotingActive ? (
+            <div className="bg-white p-12 text-center rounded-3xl shadow-xl border border-slate-100 animate-in fade-in zoom-in">
+              <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Lock className="text-amber-600 w-8 h-8" />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-800 mb-2">Voting is currently closed</h2>
+              <p className="text-slate-500">Please wait for the election admin to start the voting process. This page will automatically update.</p>
+            </div>
+          ) : (!isWithinHours && enforceTimeWindow) ? (
+            <div className="bg-white p-12 text-center rounded-3xl shadow-xl border border-red-100 animate-in fade-in zoom-in">
+              <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Clock className="text-red-600 w-8 h-8" />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-800 mb-2">Voting Window Closed</h2>
+              <p className="text-red-600 font-semibold mb-2">Voting is closed. Allowed timing is strictly between {format12Hour(startTime)} and {format12Hour(endTime)}.</p>
+              <p className="text-slate-500 text-sm">Submissions outside this official window are strictly rejected by the SecureChain protocol.</p>
+            </div>
+          ) : (
             <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-100 animate-in fade-in slide-in-from-bottom-8">
               <div className="mb-6">
-                <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-                  <Vote className="text-blue-600" /> Official Ballot
-                </h2>
-                <p className="text-slate-500 mt-1">Select one party to cast your immutable vote.</p>
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                      <Vote className="text-blue-600" /> Official Ballot
+                    </h2>
+                    <p className="text-slate-500 mt-1">Select one party to cast your immutable vote.</p>
+                  </div>
+                  <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
+                    Window Open
+                  </span>
+                </div>
               </div>
 
               {error && <div className="mb-4 flex items-center gap-2 text-red-500 text-sm font-medium bg-red-50 p-3 rounded-lg"><AlertCircle size={16} /> {error}</div>}
@@ -332,14 +379,6 @@ const VoterApp: React.FC = () => {
                   </button>
                 ))}
               </div>
-            </div>
-          ) : (
-            <div className="bg-white p-12 text-center rounded-3xl shadow-xl border border-slate-100 animate-in fade-in zoom-in">
-              <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Lock className="text-amber-600 w-8 h-8" />
-              </div>
-              <h2 className="text-2xl font-bold text-slate-800 mb-2">Voting is currently closed</h2>
-              <p className="text-slate-500">Please wait for the election admin to start the voting process. This page will automatically update.</p>
             </div>
           )
         )}
